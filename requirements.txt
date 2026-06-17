@@ -1,0 +1,15 @@
+# 核心依赖
+numpy>=1.24.0
+scipy>=1.10.0
+Pillow>=9.0.0
+PyYAML>=6.0
+
+# 渲染引擎
+# macOS / CPU 环境：使用 Open3D（点云渲染，无需 CUDA）
+open3d>=0.17.0
+# Linux + NVIDIA GPU：可额外安装 gsplat 获得高质量 3DGS 渲染
+# gsplat>=0.1.0        # 需要 PyTorch + CUDA，macOS 不可用
+# torch>=2.0.0         # gsplat 依赖
+
+# 视频生成
+opencv-python>=4.7.0
