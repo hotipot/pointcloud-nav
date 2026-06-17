@@ -6,6 +6,7 @@
     python main.py visualize          # 可视化场景
     python main.py render-video       # 渲染视频
     python main.py collect-vln        # 采集 VLN 数据
+    python main.py segment            # 3D空间分割，识别变电柜
     python main.py info               # 查看 PLY 文件信息
 """
 
@@ -248,6 +249,34 @@ def cmd_collect_vln(args):
     print(f"  元数据: {output_dir}/vln_data.json")
 
 
+def cmd_segment(args):
+    """3D空间分割，识别变电柜"""
+    from src.segmentor import segment_scene, visualize_segmentation, SegmentationResult
+
+    config = load_config(args.config)
+    gaussian = get_gaussian_data(config)
+
+    # 合并命令行参数到分割配置
+    seg_config = config.get("segment", {})
+    if args.eps:
+        seg_config["dbscan_eps"] = float(args.eps)
+    if args.min_samples:
+        seg_config["dbscan_min_samples"] = int(args.min_samples)
+    if args.sample_ratio:
+        seg_config["sample_ratio"] = float(args.sample_ratio)
+
+    # 执行分割
+    result = segment_scene(gaussian, config=seg_config)
+
+    # 保存结果
+    if args.save:
+        result.save_json(args.save)
+
+    # 可视化
+    if not args.no_vis:
+        visualize_segmentation(gaussian, result)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="点云导航 - 3DGS 场景渲染与 VLN 数据采集",
@@ -260,6 +289,10 @@ def main():
   python main.py visualize -t zigzag               # 之字形轨迹
   python main.py render-video                      # 渲染视频
   python main.py render-video -o my_video.mp4      # 指定输出路径
+  python main.py segment                            # 3D分割识别变电柜
+  python main.py segment --eps 0.2                  # 调整聚类半径
+  python main.py segment --save output/seg.json     # 保存分割结果
+  python main.py segment --no-vis                   # 不弹出可视化窗口
   python main.py collect-vln                       # 采集 VLN 数据
   python main.py collect-vln --no-depth            # 不采集深度图
         """,
@@ -292,6 +325,14 @@ def main():
     p_video.add_argument("--width", default=None, help="图像宽度")
     p_video.add_argument("--height", default=None, help="图像高度")
 
+    # segment 命令
+    p_seg = subparsers.add_parser("segment", help="3D空间分割，识别变电柜")
+    p_seg.add_argument("--eps", default=None, help="DBSCAN 邻域半径（米），默认 0.15")
+    p_seg.add_argument("--min-samples", default=None, help="DBSCAN 最小样本数，默认 50")
+    p_seg.add_argument("--sample-ratio", default=None, help="降采样比例（0-1），默认 0.3")
+    p_seg.add_argument("--save", default=None, help="保存分割结果为 JSON 文件")
+    p_seg.add_argument("--no-vis", action="store_true", help="不弹出可视化窗口")
+
     # collect-vln 命令
     p_vln = subparsers.add_parser("collect-vln", help="采集 VLN 数据")
     p_vln.add_argument("-t", "--trajectory-type", default="default",
@@ -314,6 +355,8 @@ def main():
         cmd_visualize(args)
     elif args.command == "render-video":
         cmd_render_video(args)
+    elif args.command == "segment":
+        cmd_segment(args)
     elif args.command == "collect-vln":
         cmd_collect_vln(args)
     else:

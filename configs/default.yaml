@@ -33,3 +33,44 @@ trajectory:
 output:
   video_path: "output/video.mp4"
   vln_data_path: "output/vln_data"
+
+# 3D空间分割配置
+segment:
+  # DBSCAN 聚类参数
+  dbscan_eps: 0.15              # 邻域半径（米）— 值越小簇越碎，值越大簇越合并
+  dbscan_min_samples: 50        # 最小点数 — 过滤小噪声簇
+  sample_ratio: 0.3             # 降采样比例（875K点先降采样聚类再传播标签）
+
+  # 变电柜尺寸范围（米）
+  cabinet_width_range: [0.3, 1.5]    # 宽度
+  cabinet_depth_range: [0.2, 1.2]    # 深度
+  cabinet_height_range: [1.2, 2.8]   # 高度
+
+  # 形状筛选
+  require_vertical: true          # 要求竖直（高度>宽度且高度>深度）
+  height_width_ratio_min: 1.2     # 高宽比最小值
+
+  # 颜色筛选（工业设备常见色系）
+  color_filter_enabled: true
+  color_ranges:
+    - name: gray
+      sat_max: 0.15              # 灰色：低饱和度
+      val_min: 0.2
+      val_max: 0.8
+    - name: green
+      hue_min: 0.2               # 工业绿
+      hue_max: 0.45
+      sat_min: 0.1
+      val_min: 0.15
+    - name: yellow
+      hue_min: 0.08              # 警示黄
+      hue_max: 0.2
+      sat_min: 0.2
+      val_min: 0.3
+
+  # 密度筛选
+  min_density: 50.0              # 最小表面密度（高斯体/m²）
+
+  # 位置筛选
+  exclude_boundary_ratio: 0.1    # 排除场景边界 10% 范围内的簇
+  ground_offset_min: 0.3         # 簇底面距地面最小高度（米）
