@@ -159,8 +159,8 @@ def _render_gsplat(
     # 内参矩阵: gsplat 1.5 参数名为 Ks, shape (C, 3, 3)
     Ks = torch.tensor([[[fx, 0, cx], [0, fy, cy], [0, 0, 1]]], dtype=torch.float32, device=device)  # (1, 3, 3)
 
-    # 背景色: gsplat 1.5 参数名为 backgrounds, shape (C, D)
-    backgrounds = torch.zeros(1, 3, device=device)
+    # 背景色: gsplat 1.5 packed 模式下 backgrounds shape 有兼容性问题，用 None 即默认黑色
+    backgrounds = None
 
     # 渲染
     render_colors, render_alphas, info = rasterization(
@@ -174,7 +174,6 @@ def _render_gsplat(
         width=width,
         height=height,
         sh_degree=sh_degree,
-        backgrounds=backgrounds,
         render_mode=render_mode,
     )
 
