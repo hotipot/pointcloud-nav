@@ -129,27 +129,38 @@ def _render_gsplat(
     quats = torch.tensor(gaussian_data.rotations, dtype=torch.float32, device=device)
     opacities = torch.tensor(gaussian_data.actual_opacity, dtype=torch.float32, device=device)
 
-    # SH 颜色
+    # gsplat 1.5.x API: render_mode 替代 render_depth，backgrounds 替代 background_color，Ks 替代 K
+    render_mode = "RGB+D" if render_depth else "RGB"
+
+    # SH 颜色: gsplat 1.5 要求 shape [..., N, K, 3]
     C0 = 0.28209479177387814
     sh_degree = 0
     if gaussian_data.f_rest is not None and gaussian_data.f_rest.shape[1] >= 45:
         sh_degree = 3
-        colors = torch.tensor(
-            np.concatenate([gaussian_data.f_dc, gaussian_data.f_rest], axis=-1),
-            dtype=torch.float32, device=device,
-        )
+        sh_coeffs = np.concatenate([gaussian_data.f_dc, gaussian_data.f_rest], axis=-1)  # (N, 48)
+        # 重排为 (N, K, 3) where K = 16 for sh_degree=3
+        n_gaussians = sh_coeffs.shape[0]
+        sh_coeffs = sh_coeffs.reshape(n_gaussians, 16, 3)  # (N, 16, 3)
+        colors = torch.tensor(sh_coeffs, dtype=torch.float32, device=device)
     else:
         sh_degree = 0
-        colors = torch.tensor(gaussian_data.f_dc, dtype=torch.float32, device=device)
+        # sh_degree=0 时 f_dc shape (N,3) → (N, 1, 3)
+        colors = torch.tensor(gaussian_data.f_dc[:, np.newaxis, :], dtype=torch.float32, device=device)  # (N, 1, 3)
 
-    # 视图矩阵 (world-to-camera)
-    viewmat = torch.tensor(camera_pose.view_matrix, dtype=torch.float32, device=device).T
+    # 视图矩阵 (world-to-camera): gsplat 需要 (C, 4, 4)
+    viewmat = torch.tensor(camera_pose.view_matrix, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 4, 4)
 
     # 焦距计算
     fx = width / (2 * np.tan(np.radians(fov / 2)))
     fy = fx
     cx = width / 2.0
     cy = height / 2.0
+
+    # 内参矩阵: gsplat 1.5 参数名为 Ks, shape (C, 3, 3)
+    Ks = torch.tensor([[[fx, 0, cx], [0, fy, cy], [0, 0, 1]]], dtype=torch.float32, device=device)  # (1, 3, 3)
+
+    # 背景色: gsplat 1.5 参数名为 backgrounds, shape (C, D)
+    backgrounds = torch.zeros(1, 3, device=device)
 
     # 渲染
     render_colors, render_alphas, info = rasterization(
@@ -158,21 +169,24 @@ def _render_gsplat(
         scales=scales,
         opacities=opacities,
         colors=colors,
-        viewmats=viewmat.unsqueeze(0),
-        background_color=torch.zeros(3, device=device),
-        K=torch.tensor([[[fx, 0, cx], [0, fy, cy], [0, 0, 1]]], dtype=torch.float32, device=device),
+        viewmats=viewmat,
+        Ks=Ks,
         width=width,
         height=height,
         sh_degree=sh_degree,
-        render_depth=render_depth,
+        backgrounds=backgrounds,
+        render_mode=render_mode,
     )
 
-    rgb = render_colors[0, :, :, :3].cpu().numpy()
-    rgb = np.clip(rgb * 255, 0, 255).astype(np.uint8)
+    if render_depth:
+        # render_mode="RGB+D" 时 render_colors shape 为 (C, H, W, 4), 最后一通道为深度
+        rgb = render_colors[0, :, :, :3].cpu().numpy()
+        depth = render_colors[0, :, :, 3].cpu().numpy()
+    else:
+        rgb = render_colors[0, :, :, :3].cpu().numpy()
+        depth = None
 
-    depth = None
-    if render_depth and "depth" in info:
-        depth = info["depth"][0, 0].cpu().numpy()
+    rgb = np.clip(rgb * 255, 0, 255).astype(np.uint8)
 
     return rgb, depth
 
