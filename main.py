@@ -185,7 +185,10 @@ def cmd_info(args):
 
 def cmd_visualize(args):
     """可视化场景"""
-    from src.visualize import visualize_scene, visualize_trajectory_only, render_scene_screenshot
+    from src.visualize import (
+        visualize_scene, visualize_trajectory_only, render_scene_screenshot,
+        visualize_gsplat, visualize_preview,
+    )
 
     config = load_config(args.config)
     gaussian = get_gaussian_data(config)
@@ -193,6 +196,40 @@ def cmd_visualize(args):
     camera_poses = traj.generate()
 
     print(f"轨迹信息: {len(camera_poses)} 帧, 总距离 {traj.get_total_distance():.2f}m")
+
+    # 解析分辨率
+    cam_cfg = config.get("camera", {})
+    width = int(args.width) if args.width else cam_cfg.get("resolution", [640, 480])[0]
+    height = int(args.height) if args.height else cam_cfg.get("resolution", [640, 480])[1]
+
+    # --gsplat 模式: 使用 gsplat 渲染轨迹并输出视频
+    if args.gsplat:
+        output_cfg = config.get("output", {})
+        output_path = args.output or output_cfg.get("video_path", "output/gsplat_video.mp4")
+        fps = config.get("trajectory", {}).get("fps", 30.0)
+        visualize_gsplat(
+            gaussian_data=gaussian,
+            camera_poses=camera_poses,
+            output_path=output_path,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+
+    # --preview 模式: 渲染轨迹关键帧预览图片
+    if args.preview:
+        output_dir = args.output or "output/preview"
+        visualize_preview(
+            gaussian_data=gaussian,
+            camera_poses=camera_poses,
+            output_dir=output_dir,
+            width=width,
+            height=height,
+        )
+
+    # 如果指定了 --gsplat 或 --preview，完成渲染后返回（不再打开 Open3D 窗口）
+    if args.gsplat or args.preview:
+        return
 
     # 截图模式：使用 offscreen 渲染，不弹出窗口
     if args.save_screenshot is not None:
@@ -310,6 +347,9 @@ def main():
   python main.py visualize                         # 可视化场景 + 默认轨迹
   python main.py visualize --trajectory-only       # 仅查看轨迹
   python main.py visualize -t zigzag               # 之字形轨迹
+  python main.py visualize --gsplat                # 使用 gsplat 渲染轨迹并输出视频
+  python main.py visualize --preview               # 渲染轨迹关键帧预览图片
+  python main.py visualize --gsplat --preview       # 同时输出视频和预览图
   python main.py render-video                      # 渲染视频
   python main.py render-video -o my_video.mp4      # 指定输出路径
   python main.py collect-vln                       # 采集 VLN 数据
@@ -336,6 +376,14 @@ def main():
     p_vis.add_argument("--frustum-interval", default="30", help="视锥体显示间隔")
     p_vis.add_argument("--save-screenshot", default=None, metavar="PATH",
                        help="保存场景截图为 PNG 文件（使用 offscreen 渲染，不弹出窗口）")
+    p_vis.add_argument("--gsplat", action="store_true",
+                       help="使用 gsplat 渲染轨迹并输出视频")
+    p_vis.add_argument("--preview", action="store_true",
+                       help="渲染轨迹关键帧预览图片（起点、1/4、1/2、3/4、终点）")
+    p_vis.add_argument("-o", "--output", default=None,
+                       help="输出路径（--gsplat 时用于视频，--preview 时用于目录）")
+    p_vis.add_argument("--width", default=None, help="图像宽度（--gsplat/--preview 时有效）")
+    p_vis.add_argument("--height", default=None, help="图像高度（--gsplat/--preview 时有效）")
 
     # render-video 命令
     p_video = subparsers.add_parser("render-video", help="渲染视频")

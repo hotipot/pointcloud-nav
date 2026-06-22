@@ -364,3 +364,137 @@ def render_scene_screenshot(
 
     logger.info(f"场景截图已保存: {output_path} ({width}x{height})")
     return output_path
+
+
+# ===================== gsplat 渲染可视化 =====================
+
+def visualize_gsplat(
+    gaussian_data,
+    camera_poses: list,
+    output_path: str = "output/gsplat_video.mp4",
+    width: int = 640,
+    height: int = 480,
+    fps: float = 30.0,
+    backend: Optional[str] = None,
+):
+    """
+    使用 gsplat（或最佳可用后端）逐帧渲染轨迹并输出视频。
+
+    复用 renderer.render_view() 和 video_builder.build_video()。
+    在 macOS 上无 CUDA 时自动 fallback 到 Open3D 或 numpy。
+
+    Args:
+        gaussian_data: GaussianData 对象
+        camera_poses: CameraPose 列表
+        output_path: 输出视频路径
+        width: 图像宽度
+        height: 图像高度
+        fps: 视频帧率
+        backend: 强制指定渲染后端（None 自动选择）
+
+    Returns:
+        输出视频的绝对路径
+    """
+    from src.renderer import render_view, get_renderer_backend
+    from src.video_builder import build_video
+
+    if backend is None:
+        backend = get_renderer_backend()
+
+    print(f"渲染后端: {backend or '未安装'}")
+    print(f"渲染参数: {len(camera_poses)} 帧, {width}x{height}")
+    print(f"输出路径: {output_path}")
+    print()
+
+    frames = []
+    total = len(camera_poses)
+    for i, pose in enumerate(camera_poses):
+        rgb, _ = render_view(
+            gaussian_data, pose, width, height,
+            render_depth=False, backend=backend,
+        )
+        frames.append(rgb)
+
+        if (i + 1) % 30 == 0:
+            print(f"  渲染进度: {i+1}/{total}")
+
+    video_path = build_video(frames, output_path, fps=fps)
+    print(f"\n✅ 视频已保存: {video_path}")
+    return video_path
+
+
+def visualize_preview(
+    gaussian_data,
+    camera_poses: list,
+    output_dir: str = "output/preview",
+    width: int = 640,
+    height: int = 480,
+    backend: Optional[str] = None,
+):
+    """
+    渲染轨迹关键帧预览图片（起点、1/4、1/2、3/4、终点）。
+
+    复用 renderer.render_view()，每帧保存为 PNG 文件。
+
+    Args:
+        gaussian_data: GaussianData 对象
+        camera_poses: CameraPose 列表
+        output_dir: 输出目录
+        width: 图像宽度
+        height: 图像高度
+        backend: 强制指定渲染后端（None 自动选择）
+
+    Returns:
+        保存的 PNG 文件路径列表
+    """
+    import os
+    from PIL import Image
+    from src.renderer import render_view, get_renderer_backend
+
+    if backend is None:
+        backend = get_renderer_backend()
+
+    total = len(camera_poses)
+    if total < 2:
+        logger.warning("轨迹帧数不足，无法生成预览")
+        return []
+
+    # 关键帧索引: 起点, 1/4, 1/2, 3/4, 终点
+    keyframe_indices = [0, total // 4, total // 2, 3 * total // 4, total - 1]
+    # 去重并保持顺序
+    seen = set()
+    keyframe_indices = [i for i in keyframe_indices if not (i in seen or seen.add(i))]
+
+    labels = {
+        0: "start",
+        total // 4: "quarter",
+        total // 2: "middle",
+        3 * total // 4: "three_quarter",
+        total - 1: "end",
+    }
+
+    output_dir = os.path.expanduser(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"渲染后端: {backend or '未安装'}")
+    print(f"预览关键帧: {len(keyframe_indices)} 帧, {width}x{height}")
+    print(f"输出目录: {output_dir}")
+    print()
+
+    saved_paths = []
+    for idx in keyframe_indices:
+        pose = camera_poses[idx]
+        label = labels.get(idx, f"frame_{idx:04d}")
+
+        rgb, _ = render_view(
+            gaussian_data, pose, width, height,
+            render_depth=False, backend=backend,
+        )
+
+        out_path = os.path.join(output_dir, f"preview_{label}_{idx:04d}.png")
+        Image.fromarray(rgb).save(out_path)
+        saved_paths.append(out_path)
+        print(f"  已保存: {out_path}")
+
+    print(f"\n✅ 预览图已保存至: {output_dir}/")
+    return saved_paths
