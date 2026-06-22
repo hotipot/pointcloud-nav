@@ -488,7 +488,7 @@ def visualize_gsplat_interactive(
     print(f"检测到 {num_gpus} 块 NVIDIA GPU:")
     for i in range(num_gpus):
         name = torch.cuda.get_device_name(i)
-        mem = torch.cuda.get_device_properties(i).total_mem / (1024**3)
+        mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)
         marker = " ← 选中" if i == gpu_id else ""
         print(f"  GPU {i}: {name} ({mem:.1f} GB){marker}")
 
