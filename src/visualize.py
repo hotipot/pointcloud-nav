@@ -423,6 +423,188 @@ def visualize_gsplat(
     return video_path
 
 
+# ===================== 交互式 gsplat 可视化 =====================
+
+def visualize_gsplat_interactive(
+    gaussian_data,
+    port: int = 8080,
+    width: int = 640,
+    height: int = 480,
+    fov: float = 90.0,
+):
+    """
+    使用 viser 启动交互式 gsplat 渲染可视化（纯 viser 实现，无 nerfview 依赖）。
+
+    启动 viser WebSocket 服务器，在浏览器中实时渲染 3DGS 场景。
+    鼠标拖拽旋转视角，滚轮缩放。
+
+    Args:
+        gaussian_data: GaussianData 对象
+        port: viser 服务器端口（默认 8080）
+        width: 渲染图像宽度（默认 640）
+        height: 渲染图像高度（默认 480）
+        fov: 初始垂直视场角（度，默认 90.0）
+
+    Note:
+        需要 NVIDIA GPU (CUDA)，macOS 不可用。
+    """
+    import time
+    import platform
+    import threading
+    import numpy as np
+    import torch
+
+    # --- CUDA 检查 ---
+    if not torch.cuda.is_available():
+        system = platform.system()
+        if system == "Darwin":
+            msg = (
+                "❌ macOS 不支持 CUDA，无法使用 gsplat 交互式渲染。\n"
+                "   gsplat 的 rasterization 内核基于 CUDA C++，仅在 NVIDIA GPU 上可用。\n"
+                "   \n"
+                "   替代方案：\n"
+                "   - 使用 Open3D 点云可视化：python main.py visualize\n"
+                "   - 在配备 NVIDIA GPU 的 Linux 系统上运行此功能"
+            )
+        else:
+            msg = (
+                "❌ 未检测到 CUDA。gsplat 交互式渲染需要 NVIDIA GPU。\n"
+                "   请确保：\n"
+                "   1. 已安装 NVIDIA 驱动\n"
+                "   2. 已安装 CUDA toolkit\n"
+                "   3. PyTorch 的 CUDA 版本与系统 CUDA 版本匹配"
+            )
+        raise RuntimeError(msg)
+
+    device = torch.device("cuda")
+
+    # --- 准备高斯参数（转换为 GPU tensor，与 _render_gsplat 保持一致） ---
+    means = torch.tensor(gaussian_data.positions, dtype=torch.float32, device=device)
+    scales = torch.tensor(gaussian_data.actual_scales, dtype=torch.float32, device=device)
+    quats = torch.tensor(gaussian_data.rotations, dtype=torch.float32, device=device)
+    opacities = torch.tensor(gaussian_data.actual_opacity, dtype=torch.float32, device=device)
+
+    # SH 颜色处理（复用 renderer.py _render_gsplat 的 SH 逻辑）
+    if gaussian_data.f_rest is not None and gaussian_data.f_rest.shape[1] >= 45:
+        sh_degree = 3
+        sh_coeffs = np.concatenate([gaussian_data.f_dc, gaussian_data.f_rest], axis=-1)  # (N, 48)
+        n_gaussians = sh_coeffs.shape[0]
+        sh_coeffs = sh_coeffs.reshape(n_gaussians, 16, 3)  # (N, 16, 3)
+        colors = torch.tensor(sh_coeffs, dtype=torch.float32, device=device)
+    else:
+        sh_degree = 0
+        colors = torch.tensor(gaussian_data.f_dc[:, np.newaxis, :], dtype=torch.float32, device=device)
+
+    print(f"高斯数量: {means.shape[0]:,}")
+    print(f"SH degree: {sh_degree}")
+    print(f"设备: {device}")
+    print(f"渲染分辨率: {width}x{height}")
+
+    # --- 检查 viser 依赖（纯 viser，无需 nerfview） ---
+    try:
+        import viser
+        import viser.transforms as vt
+    except ImportError:
+        raise ImportError("交互式可视化需要 viser: pip install viser")
+
+    from gsplat import rasterization
+
+    # --- 计算初始相机位姿（从场景中心向外看） ---
+    center = gaussian_data.positions.mean(axis=0)
+    scene_extent = float(np.max(np.linalg.norm(gaussian_data.positions - center, axis=1)))
+    initial_dist = max(scene_extent * 2.0, 2.0)
+    initial_position = np.array([0.0, 0.0, initial_dist], dtype=np.float64) + center
+
+    # --- 创建 viser 服务器 ---
+    server = viser.ViserServer(port=port)
+
+    # 渲染防重入锁：避免前一次渲染未完成时重复触发
+    _render_lock = threading.Lock()
+
+    def render_view(camera):
+        """
+        从 viser CameraHandle 提取位姿，调用 gsplat rasterization 渲染，
+        将结果设为场景背景图像。
+        """
+        if not _render_lock.acquire(blocking=False):
+            # 前一次渲染尚未完成，跳过此帧
+            return
+
+        try:
+            # 构造 c2w 矩阵（camera-to-world）
+            c2w = np.eye(4, dtype=np.float32)
+            c2w[:3, :3] = vt.SO3(camera.wxyz).as_matrix()
+            c2w[:3, 3] = np.array(camera.position, dtype=np.float32)
+
+            # 构造内参 K 矩阵
+            # viser 的 fov 为垂直视场角（弧度）
+            fov_rad = camera.fov
+            fy = height / (2.0 * np.tan(fov_rad / 2.0))
+            fx = fy * width / height  # 保持像素正方形
+            K = np.array(
+                [[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]],
+                dtype=np.float32,
+            )
+
+            # 转 GPU tensor
+            c2w_t = torch.from_numpy(c2w).to(device)
+            K_t = torch.from_numpy(K).to(device)
+            viewmat = torch.inverse(c2w_t).unsqueeze(0)  # (1, 4, 4) world-to-camera
+            Ks = K_t.unsqueeze(0)  # (1, 3, 3)
+
+            with torch.inference_mode():
+                # gsplat 1.5.x: 不传 backgrounds 参数
+                render_colors, render_alphas, info = rasterization(
+                    means=means,
+                    quats=quats,
+                    scales=scales,
+                    opacities=opacities,
+                    colors=colors,
+                    viewmats=viewmat,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree,
+                    render_mode="RGB",
+                )
+
+            rgb = render_colors[0, ..., :3].clamp(0.0, 1.0).cpu().numpy()
+            rgb_uint8 = (rgb * 255).astype(np.uint8)
+
+            # 将渲染结果设为场景背景（所有客户端共享）
+            server.scene.set_background_image(rgb_uint8, format="jpeg")
+        finally:
+            _render_lock.release()
+
+    @server.on_client_connect
+    def _(client: viser.ClientHandle):
+        # 设置初始相机位姿
+        client.camera.position = initial_position
+        client.camera.look_at = tuple(center.tolist())
+        client.camera.fov = float(np.radians(fov))
+
+        # 注册相机更新回调：每次相机变化时重新渲染
+        @client.camera.on_update
+        def _(_: viser.CameraHandle):
+            render_view(client.camera)
+
+        # 初始渲染
+        render_view(client.camera)
+
+    print(f"\n{'='*55}")
+    print(f"  🎨 gsplat 交互式可视化已启动")
+    print(f"  🌐 打开浏览器访问: http://localhost:{port}")
+    print(f"  🖱️  鼠标拖拽旋转 | 滚轮缩放")
+    print(f"  ⏹️  按 Ctrl+C 退出")
+    print(f"{'='*55}\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n👋 可视化已停止")
+
+
 def visualize_preview(
     gaussian_data,
     camera_poses: list,

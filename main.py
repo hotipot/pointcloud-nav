@@ -187,7 +187,7 @@ def cmd_visualize(args):
     """可视化场景"""
     from src.visualize import (
         visualize_scene, visualize_trajectory_only, render_scene_screenshot,
-        visualize_gsplat, visualize_preview,
+        visualize_gsplat, visualize_preview, visualize_gsplat_interactive,
     )
 
     config = load_config(args.config)
@@ -201,6 +201,19 @@ def cmd_visualize(args):
     cam_cfg = config.get("camera", {})
     width = int(args.width) if args.width else cam_cfg.get("resolution", [640, 480])[0]
     height = int(args.height) if args.height else cam_cfg.get("resolution", [640, 480])[1]
+
+    # --gsplat-interactive 模式: 启动 viser 浏览器交互式渲染
+    if args.gsplat_interactive:
+        port = int(args.port) if args.port else 8080
+        fov = config.get("camera", {}).get("fov", 90.0)
+        visualize_gsplat_interactive(
+            gaussian_data=gaussian,
+            port=port,
+            width=width,
+            height=height,
+            fov=fov,
+        )
+        return  # 交互式模式会阻塞直到 Ctrl+C
 
     # --gsplat 模式: 使用 gsplat 渲染轨迹并输出视频
     if args.gsplat:
@@ -228,7 +241,7 @@ def cmd_visualize(args):
         )
 
     # 如果指定了 --gsplat 或 --preview，完成渲染后返回（不再打开 Open3D 窗口）
-    if args.gsplat or args.preview:
+    if args.gsplat or args.preview or args.gsplat_interactive:
         return
 
     # 截图模式：使用 offscreen 渲染，不弹出窗口
@@ -382,8 +395,11 @@ def main():
                        help="渲染轨迹关键帧预览图片（起点、1/4、1/2、3/4、终点）")
     p_vis.add_argument("-o", "--output", default=None,
                        help="输出路径（--gsplat 时用于视频，--preview 时用于目录）")
-    p_vis.add_argument("--width", default=None, help="图像宽度（--gsplat/--preview 时有效）")
-    p_vis.add_argument("--height", default=None, help="图像高度（--gsplat/--preview 时有效）")
+    p_vis.add_argument("--gsplat-interactive", action="store_true",
+                       help="启动交互式 gsplat 渲染可视化（viser + nerfview，浏览器打开）")
+    p_vis.add_argument("--port", default=None, help="交互式可视化端口（默认 8080）")
+    p_vis.add_argument("--width", default=None, help="图像宽度（--gsplat/--preview/--gsplat-interactive 时有效）")
+    p_vis.add_argument("--height", default=None, help="图像高度（--gsplat/--preview/--gsplat-interactive 时有效）")
 
     # render-video 命令
     p_video = subparsers.add_parser("render-video", help="渲染视频")
