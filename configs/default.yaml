@@ -2,7 +2,9 @@
 # 3DGS 场景渲染与 VLN 数据采集
 
 scene:
-  ply_path: "~/.openclaw/workspace-coder/pointcloud-nav/pointcloud_data/Aholo-603.ply"
+  # PLY 文件路径 — 请在 local.yaml 中覆盖，不要修改本文件
+  # 示例: ply_path: "/home/wm1/jwang/dataset/Aholo-603.ply"
+  ply_path: null
 
 robot:
   height: 1.5       # 相机高度（米）

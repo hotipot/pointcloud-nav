@@ -10,6 +10,7 @@
 """
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -31,12 +32,35 @@ from src.trajectory import (
 
 
 def load_config(config_path: str) -> dict:
-    """加载 YAML 配置文件"""
+    """加载 YAML 配置文件，自动合并 local.yaml"""
+    import copy
+
     config_path = os.path.expanduser(config_path)
+    config = {}
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    return {}
+            config = yaml.safe_load(f) or {}
+
+    # 自动合并 local.yaml（同目录下）
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    local_path = os.path.join(config_dir, "local.yaml")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            local_config = yaml.safe_load(f) or {}
+        config = _deep_merge(config, local_config)
+
+    return config
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """深度合并字典，override 中的值覆盖 base 中的同名键"""
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 def get_gaussian_data(config: dict, verbose: bool = True):
