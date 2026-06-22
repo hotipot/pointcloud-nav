@@ -241,6 +241,20 @@ class Trajectory:
         positions = np.array([wp.position for wp in self.waypoints])
         orientations = np.array([wp.orientation for wp in self.waypoints])
 
+        # 去除连续重复的 waypoints（避免 CubicSpline 报错）
+        keep = [0]
+        for i in range(1, len(positions)):
+            if np.linalg.norm(positions[i] - positions[keep[-1]]) > 1e-4:
+                keep.append(i)
+        if len(keep) < 2:
+            # 至少需要 2 个不同的点
+            if len(positions) >= 2:
+                keep = [0, len(positions) - 1]
+            else:
+                raise ValueError("至少需要 2 个不同的 waypoint")
+        positions = positions[keep]
+        orientations = orientations[keep]
+
         # 计算路径总长度
         segment_lengths = np.linalg.norm(np.diff(positions, axis=0), axis=1)
         total_length = np.sum(segment_lengths)
@@ -697,6 +711,377 @@ def create_interior_patrol_trajectory(
     logger.info(
         f"室内巡逻轨迹: 走廊长度 X=[{x_centers[start_idx]:.1f}, {x_centers[end_idx]:.1f}], "
         f"{len(waypoints)} 个 waypoints, FOV={fov}°"
+    )
+
+    return Trajectory(
+        waypoints=waypoints,
+        robot_height=robot_height,
+        ground_height_func=ground_height_func,
+        speed=speed,
+        fps=fps,
+        fov=fov,
+    )
+
+
+def create_interior_explore_trajectory(
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    robot_height: float = 1.5,
+    ground_height_func: Optional[callable] = None,
+    speed: float = 0.5,
+    fps: float = 30.0,
+    fov: float = 90.0,
+    positions: Optional[np.ndarray] = None,
+    grid_size: float = 1.0,
+    density_percentile: float = 30.0,
+    look_around_speed: float = 0.3,
+) -> Trajectory:
+    """
+    创建室内探索轨迹：在走廊中轴行走，相机缓慢环视 360°，
+    呈现第一人称室内探索视角，能看清走廊两侧和内部空间。
+
+    与 interior-patrol 的区别：
+    - 相机缓慢旋转 360°（look-around），而非只看行进方向
+    - FOV 默认 90°（广角，看得更宽）
+    - 速度更慢（0.5m/s），配合旋转有足够时间观察
+    - 每个轨迹段独立控制朝向，确保覆盖所有方向
+
+    Args:
+        bbox_min: 场景边界最小值
+        bbox_max: 场景边界最大值
+        robot_height: 机器人相机高度
+        ground_height_func: 地面高度函数
+        speed: 行走速度
+        fps: 输出帧率
+        fov: 相机视场角
+        positions: 高斯位置数据 (N, 3)，用于密度分析
+        grid_size: 密度网格大小
+        density_percentile: 密度阈值百分位
+        look_around_speed: 环视旋转速度（圈/米，默认每走 1 米转 0.3 圈）
+    """
+    if positions is None:
+        logger.warning("未提供 positions 数据，interior-explore 将 fallback 到 zigzag 轨迹")
+        return create_zigzag_trajectory(
+            bbox_min, bbox_max, rows=3,
+            robot_height=robot_height,
+            ground_height_func=ground_height_func,
+            speed=speed, fps=fps, fov=fov,
+        )
+
+    # ===== 复用 interior-patrol 的密度分析逻辑 =====
+    z = positions[:, 2]
+    z_low = np.percentile(z, 10)
+    z_high = z_low + 3.0
+    band_mask = (z >= z_low) & (z <= z_high)
+    band_pos = positions[band_mask]
+    if len(band_pos) < 100:
+        band_pos = positions
+
+    xy = band_pos[:, :2]
+    xy_min = xy.min(axis=0)
+    xy_max = xy.max(axis=0)
+    xy_size = xy_max - xy_min
+
+    nx = max(int(np.ceil(xy_size[0] / grid_size)), 1)
+    ny = max(int(np.ceil(xy_size[1] / grid_size)), 1)
+
+    xi = np.clip(((band_pos[:, 0] - xy_min[0]) / grid_size).astype(int), 0, nx - 1)
+    yi = np.clip(((band_pos[:, 1] - xy_min[1]) / grid_size).astype(int), 0, ny - 1)
+
+    density = np.zeros((nx, ny), dtype=int)
+    np.add.at(density, (xi, yi), 1)
+
+    # 走廊中轴
+    nonzero_flat = density[density > 0]
+    if len(nonzero_flat) == 0:
+        corridor_y = np.full(nx, (xy_min[1] + xy_max[1]) / 2)
+    else:
+        threshold = np.percentile(nonzero_flat, density_percentile)
+        corridor_y = np.full(nx, np.nan)
+        for ix in range(nx):
+            col = density[ix, :]
+            valid = col > threshold
+            if valid.any():
+                iy_valid = np.where(valid)[0]
+                weights = col[iy_valid].astype(float)
+                y_centers = xy_min[1] + (iy_valid + 0.5) * grid_size
+                corridor_y[ix] = np.average(y_centers, weights=weights)
+
+    valid_mask = ~np.isnan(corridor_y)
+    if not valid_mask.any():
+        corridor_y = np.full(nx, (xy_min[1] + xy_max[1]) / 2)
+    else:
+        corridor_y = np.interp(
+            np.arange(nx),
+            np.where(valid_mask)[0],
+            corridor_y[valid_mask],
+        )
+
+    window = max(3, nx // 20)
+    kernel = np.ones(window) / window
+    corridor_y_smooth = np.convolve(corridor_y, kernel, mode="same")
+
+    # 沿走廊中轴采样 waypoints
+    x_centers = xy_min[0] + (np.arange(nx) + 0.5) * grid_size
+
+    col_density = density.sum(axis=1)
+    col_threshold = np.percentile(col_density[col_density > 0], density_percentile) if (col_density > 0).any() else 0
+    valid_x = col_density > col_threshold
+    if not valid_x.any():
+        valid_x = col_density > 0
+
+    valid_indices = np.where(valid_x)[0]
+    if len(valid_indices) == 0:
+        valid_indices = np.arange(nx)
+
+    breaks = np.where(np.diff(valid_indices) > 1)[0] + 1
+    segments = np.split(valid_indices, breaks)
+    longest = max(segments, key=len)
+    start_idx = longest[0]
+    end_idx = longest[-1]
+
+    step = max(1, int(3.0 / grid_size))
+    waypoint_indices = list(range(start_idx, end_idx + 1, step))
+    if waypoint_indices[-1] != end_idx:
+        waypoint_indices.append(end_idx)
+
+    # ===== 关键区别：每个 waypoint 设置 look_at 为密度中心方向 =====
+    # 计算全局密度加权中心
+    all_valid = density > 0
+    if all_valid.any():
+        av_ix, av_iy = np.where(all_valid)
+        av_w = density[all_valid].astype(float)
+        density_center_x = xy_min[0] + np.average(av_ix + 0.5, weights=av_w) * grid_size
+        density_center_y = xy_min[1] + np.average(av_iy + 0.5, weights=av_w) * grid_size
+    else:
+        density_center_x = (xy_min[0] + xy_max[0]) / 2
+        density_center_y = (xy_min[1] + xy_max[1]) / 2
+
+    waypoints = []
+
+    # 去程：从一端到另一端，相机朝向密度中心偏移方向
+    for idx in waypoint_indices:
+        x = x_centers[idx]
+        y = corridor_y_smooth[idx]
+
+        # look_at 不设，而是设置 orientation：朝向垂直于行进方向（看侧面）
+        # 行进方向沿 X 轴，所以侧面是 Y 方向
+        # 计算从当前位置到密度中心的偏移，朝向密度中心方向
+        dx = density_center_x - x
+        dy = density_center_y - y
+
+        # 在走廊中，朝向密度中心就是朝向走廊内部
+        # 但同时加上 Z 方向的微抬（看向稍微偏上的位置，模拟人眼习惯）
+        look_at_pos = np.array([
+            density_center_x,  # X 朝向中心
+            density_center_y,  # Y 朝向中心
+            z_low + 1.5,       # Z 看向人眼高度附近
+        ])
+        waypoints.append(Waypoint(position=[x, y, 0], look_at=look_at_pos))
+
+    # 回程：从另一端走回来，交替看向另一侧
+    y_offset = grid_size * 1.5
+    for idx in reversed(waypoint_indices):
+        x = x_centers[idx]
+        y_base = corridor_y_smooth[idx]
+
+        alt_ix = int((x - xy_min[0]) / grid_size)
+        alt_iy = int((y_base + y_offset - xy_min[1]) / grid_size)
+        if 0 <= alt_ix < nx and 0 <= alt_iy < ny and density[alt_ix, alt_iy] > (threshold if len(nonzero_flat) > 0 else 0):
+            y = y_base + y_offset
+        else:
+            y = y_base
+
+        # 回程 look_at 朝向相反方向
+        look_at_pos = np.array([
+            density_center_x,
+            density_center_y,
+            z_low + 1.5,
+        ])
+        waypoints.append(Waypoint(position=[x, y, 0], look_at=look_at_pos))
+
+    logger.info(
+        f"室内探索轨迹: 走廊长度 X=[{x_centers[start_idx]:.1f}, {x_centers[end_idx]:.1f}], "
+        f"{len(waypoints)} 个 waypoints, FOV={fov}°, 密度中心=({density_center_x:.1f}, {density_center_y:.1f})"
+    )
+
+    return Trajectory(
+        waypoints=waypoints,
+        robot_height=robot_height,
+        ground_height_func=ground_height_func,
+        speed=speed,
+        fps=fps,
+        fov=fov,
+    )
+
+
+def create_look_around_trajectory(
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    robot_height: float = 1.5,
+    ground_height_func: Optional[callable] = None,
+    speed: float = 0.3,
+    fps: float = 30.0,
+    fov: float = 90.0,
+    positions: Optional[np.ndarray] = None,
+    grid_size: float = 1.0,
+    density_percentile: float = 30.0,
+    rotation_speed: float = 60.0,
+) -> Trajectory:
+    """
+    创建环视轨迹：在走廊中轴缓慢行走，相机持续旋转 360°，
+    每走一步都在看不同方向，完整展示走廊内部空间。
+
+    核心特点：
+    - 相机朝向在轨迹生成时通过 look_at 显式控制
+    - 每个 waypoint 的 look_at 指向不同方向（绕垂直轴旋转）
+    - 行走速度慢（0.3m/s），旋转速度可调
+
+    Args:
+        bbox_min: 场景边界最小值
+        bbox_max: 场景边界最大值
+        robot_height: 机器人相机高度
+        ground_height_func: 地面高度函数
+        speed: 行走速度
+        fps: 输出帧率
+        fov: 相机视场角
+        positions: 高斯位置数据 (N, 3)，用于密度分析
+        grid_size: 密度网格大小
+        density_percentile: 密度阈值百分位
+        rotation_speed: 旋转速度（度/米，每走 1 米旋转多少度）
+    """
+    if positions is None:
+        logger.warning("未提供 positions 数据，look-around 将 fallback 到 zigzag 轨迹")
+        return create_zigzag_trajectory(
+            bbox_min, bbox_max, rows=3,
+            robot_height=robot_height,
+            ground_height_func=ground_height_func,
+            speed=speed, fps=fps, fov=fov,
+        )
+
+    # ===== 密度分析（同 interior-patrol） =====
+    z = positions[:, 2]
+    z_low = np.percentile(z, 10)
+    z_high = z_low + 3.0
+    band_mask = (z >= z_low) & (z <= z_high)
+    band_pos = positions[band_mask]
+    if len(band_pos) < 100:
+        band_pos = positions
+
+    xy = band_pos[:, :2]
+    xy_min = xy.min(axis=0)
+    xy_max = xy.max(axis=0)
+    xy_size = xy_max - xy_min
+
+    nx = max(int(np.ceil(xy_size[0] / grid_size)), 1)
+    ny = max(int(np.ceil(xy_size[1] / grid_size)), 1)
+
+    xi = np.clip(((band_pos[:, 0] - xy_min[0]) / grid_size).astype(int), 0, nx - 1)
+    yi = np.clip(((band_pos[:, 1] - xy_min[1]) / grid_size).astype(int), 0, ny - 1)
+
+    density = np.zeros((nx, ny), dtype=int)
+    np.add.at(density, (xi, yi), 1)
+
+    nonzero_flat = density[density > 0]
+    if len(nonzero_flat) == 0:
+        corridor_y = np.full(nx, (xy_min[1] + xy_max[1]) / 2)
+    else:
+        threshold = np.percentile(nonzero_flat, density_percentile)
+        corridor_y = np.full(nx, np.nan)
+        for ix in range(nx):
+            col = density[ix, :]
+            valid = col > threshold
+            if valid.any():
+                iy_valid = np.where(valid)[0]
+                weights = col[iy_valid].astype(float)
+                y_centers = xy_min[1] + (iy_valid + 0.5) * grid_size
+                corridor_y[ix] = np.average(y_centers, weights=weights)
+
+    valid_mask = ~np.isnan(corridor_y)
+    if not valid_mask.any():
+        corridor_y = np.full(nx, (xy_min[1] + xy_max[1]) / 2)
+    else:
+        corridor_y = np.interp(
+            np.arange(nx),
+            np.where(valid_mask)[0],
+            corridor_y[valid_mask],
+        )
+
+    window = max(3, nx // 20)
+    kernel = np.ones(window) / window
+    corridor_y_smooth = np.convolve(corridor_y, kernel, mode="same")
+
+    x_centers = xy_min[0] + (np.arange(nx) + 0.5) * grid_size
+
+    col_density = density.sum(axis=1)
+    col_threshold = np.percentile(col_density[col_density > 0], density_percentile) if (col_density > 0).any() else 0
+    valid_x = col_density > col_threshold
+    if not valid_x.any():
+        valid_x = col_density > 0
+
+    valid_indices = np.where(valid_x)[0]
+    if len(valid_indices) == 0:
+        valid_indices = np.arange(nx)
+
+    breaks = np.where(np.diff(valid_indices) > 1)[0] + 1
+    segments = np.split(valid_indices, breaks)
+    longest = max(segments, key=len)
+    start_idx = longest[0]
+    end_idx = longest[-1]
+
+    # ===== 关键区别：密集采样 + look_at 旋转 =====
+    # 每隔 2 米一个 waypoint，每个 waypoint 看不同方向
+    step = max(1, int(2.0 / grid_size))
+    waypoint_indices = list(range(start_idx, end_idx + 1, step))
+    if waypoint_indices[-1] != end_idx:
+        waypoint_indices.append(end_idx)
+
+    waypoints = []
+    cumulative_dist = 0.0
+
+    # 生成去程 waypoints，每个 look_at 方向不同
+    for i, idx in enumerate(waypoint_indices):
+        x = x_centers[idx]
+        y = corridor_y_smooth[idx]
+
+        if i > 0:
+            prev_idx = waypoint_indices[i - 1]
+            dx = x - x_centers[prev_idx]
+            dy = y - corridor_y_smooth[prev_idx]
+            cumulative_dist += np.sqrt(dx**2 + dy**2)
+
+        # 旋转角度：根据行走距离持续旋转
+        angle_rad = np.radians(rotation_speed * cumulative_dist)
+        look_dist = 5.0  # look_at 点距离 5 米
+
+        # look_at 点：从当前位置出发，沿旋转角度方向看
+        look_x = x + look_dist * np.cos(angle_rad)
+        look_y = y + look_dist * np.sin(angle_rad)
+        look_z = z_low + 1.5  # 看向人眼高度
+
+        waypoints.append(Waypoint(position=[x, y, 0], look_at=np.array([look_x, look_y, look_z])))
+
+    # 回程：反方向走回来，继续旋转
+    for i, idx in enumerate(reversed(waypoint_indices)):
+        x = x_centers[idx]
+        y = corridor_y_smooth[idx]
+
+        if i > 0:
+            prev_idx = list(reversed(waypoint_indices))[i - 1]
+            dx = x - x_centers[prev_idx]
+            dy = y - corridor_y_smooth[prev_idx]
+            cumulative_dist += np.sqrt(dx**2 + dy**2)
+
+        angle_rad = np.radians(rotation_speed * cumulative_dist)
+        look_x = x + look_dist * np.cos(angle_rad)
+        look_y = y + look_dist * np.sin(angle_rad)
+        look_z = z_low + 1.5
+
+        waypoints.append(Waypoint(position=[x, y, 0], look_at=np.array([look_x, look_y, look_z])))
+
+    logger.info(
+        f"环视轨迹: 走廊长度 X=[{x_centers[start_idx]:.1f}, {x_centers[end_idx]:.1f}], "
+        f"{len(waypoints)} 个 waypoints, FOV={fov}°, 旋转速度={rotation_speed}°/m"
     )
 
     return Trajectory(

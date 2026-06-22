@@ -24,6 +24,8 @@ from src.trajectory import (
     create_default_trajectory,
     create_zigzag_trajectory,
     create_interior_patrol_trajectory,
+    create_interior_explore_trajectory,
+    create_look_around_trajectory,
     waypoints_from_list,
 )
 
@@ -99,6 +101,32 @@ def build_trajectory(config: dict, gaussian_data, traj_type: str = "default"):
             positions=positions,
             grid_size=traj_cfg.get("grid_size", 1.0),
             density_percentile=traj_cfg.get("density_percentile", 30.0),
+        )
+    elif traj_type == "interior-explore":
+        return create_interior_explore_trajectory(
+            bbox_min, bbox_max,
+            robot_height=robot_height,
+            ground_height_func=ground_func,
+            speed=traj_cfg.get("speed", 0.5),
+            fps=fps,
+            fov=fov,
+            positions=positions,
+            grid_size=traj_cfg.get("grid_size", 1.0),
+            density_percentile=traj_cfg.get("density_percentile", 30.0),
+            look_around_speed=traj_cfg.get("look_around_speed", 0.3),
+        )
+    elif traj_type == "look-around":
+        return create_look_around_trajectory(
+            bbox_min, bbox_max,
+            robot_height=robot_height,
+            ground_height_func=ground_func,
+            speed=traj_cfg.get("speed", 0.3),
+            fps=fps,
+            fov=fov,
+            positions=positions,
+            grid_size=traj_cfg.get("grid_size", 1.0),
+            density_percentile=traj_cfg.get("density_percentile", 30.0),
+            rotation_speed=traj_cfg.get("rotation_speed", 60.0),
         )
     else:
         return create_default_trajectory(
@@ -276,7 +304,8 @@ def main():
     # visualize 命令
     p_vis = subparsers.add_parser("visualize", help="可视化场景")
     p_vis.add_argument("-t", "--trajectory-type", default="default",
-                       choices=["default", "zigzag", "interior-patrol"], help="轨迹类型")
+                       choices=["default", "zigzag", "interior-patrol", "interior-explore", "look-around"],
+                       help="轨迹类型")
     p_vis.add_argument("--trajectory-only", action="store_true",
                        help="仅显示轨迹，不加载点云（更快）")
     p_vis.add_argument("--point-size", default="2.0", help="点云渲染大小")
@@ -287,7 +316,8 @@ def main():
     # render-video 命令
     p_video = subparsers.add_parser("render-video", help="渲染视频")
     p_video.add_argument("-t", "--trajectory-type", default="default",
-                         choices=["default", "zigzag", "interior-patrol"], help="轨迹类型")
+                         choices=["default", "zigzag", "interior-patrol", "interior-explore", "look-around"],
+                         help="轨迹类型")
     p_video.add_argument("-o", "--output", default=None, help="输出视频路径")
     p_video.add_argument("--width", default=None, help="图像宽度")
     p_video.add_argument("--height", default=None, help="图像高度")
@@ -295,7 +325,8 @@ def main():
     # collect-vln 命令
     p_vln = subparsers.add_parser("collect-vln", help="采集 VLN 数据")
     p_vln.add_argument("-t", "--trajectory-type", default="default",
-                       choices=["default", "zigzag", "interior-patrol"], help="轨迹类型")
+                       choices=["default", "zigzag", "interior-patrol", "interior-explore", "look-around"],
+                       help="轨迹类型")
     p_vln.add_argument("-o", "--output", default=None, help="输出目录")
     p_vln.add_argument("--no-depth", action="store_true", help="不采集深度图")
 

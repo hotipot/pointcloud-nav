@@ -6,24 +6,33 @@ scene:
 
 robot:
   height: 1.5       # 相机高度（米）
-  fov: 60           # 水平视场角（度）— 室内巡逻视角
+  fov: 90           # 水平视场角（度）— 广角看清走廊内部
 
 camera:
   resolution: [640, 480]  # [宽, 高]
 
 trajectory:
-  # 轨迹类型: interior-patrol(室内走廊巡逻) / default(矩形巡逻) / zigzag(之字形扫描)
-  type: interior-patrol
-  # 行走速度（米/秒）— 巡逻步速
-  speed: 0.8
+  # 轨迹类型:
+  #   look-around      — 环视模式：走廊中轴行走 + 360°旋转，看清内部空间（推荐）
+  #   interior-explore — 探索模式：走廊中轴行走 + 朝向密度中心，看清走廊深处
+  #   interior-patrol  — 巡逻模式：走廊中轴行走 + 前视，模拟第一人称巡逻
+  #   default          — 矩形巡逻
+  #   zigzag           — 之字形扫描
+  type: look-around
+  # 行走速度（米/秒）
+  speed: 0.3
   # 输出帧率
   fps: 30.0
   # zigzag 模式的扫描行数
   rows: 3
-  # interior-patrol 密度网格大小（米）
+  # interior-patrol / interior-explore / look-around 密度网格大小（米）
   grid_size: 1.0
-  # interior-patrol 密度阈值百分位
+  # 密度阈值百分位
   density_percentile: 30.0
+  # look-around 模式旋转速度（度/米）
+  rotation_speed: 60.0
+  # interior-explore 环视速度（圈/米）
+  look_around_speed: 0.3
   # 自定义 waypoints（优先级高于 type）
   # 格式: [[x1,y1,z1], [x2,y2,z2], ...]
   # z 值会被自动调整为 地面高度 + robot.height
