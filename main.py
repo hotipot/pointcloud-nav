@@ -206,12 +206,16 @@ def cmd_visualize(args):
     if args.gsplat_interactive:
         port = int(args.port) if args.port else 8080
         fov = config.get("camera", {}).get("fov", 90.0)
+        image_format = args.image_format or "png"
+        gpu_id = args.gpu if args.gpu is not None else 0
         visualize_gsplat_interactive(
             gaussian_data=gaussian,
             port=port,
             width=width,
             height=height,
             fov=fov,
+            image_format=image_format,
+            gpu_id=gpu_id,
         )
         return  # 交互式模式会阻塞直到 Ctrl+C
 
@@ -396,8 +400,12 @@ def main():
     p_vis.add_argument("-o", "--output", default=None,
                        help="输出路径（--gsplat 时用于视频，--preview 时用于目录）")
     p_vis.add_argument("--gsplat-interactive", action="store_true",
-                       help="启动交互式 gsplat 渲染可视化（viser + nerfview，浏览器打开）")
+                       help="启动交互式 gsplat 渲染可视化（viser 浏览器打开）")
     p_vis.add_argument("--port", default=None, help="交互式可视化端口（默认 8080）")
+    p_vis.add_argument("--image-format", default=None, choices=["png", "jpeg"],
+                       help="交互式渲染传输格式（png 无损慢，jpeg 快但有损，默认 png）")
+    p_vis.add_argument("--gpu", default=None, type=int,
+                       help="交互式渲染使用的 GPU 编号（默认 0）")
     p_vis.add_argument("--width", default=None, help="图像宽度（--gsplat/--preview/--gsplat-interactive 时有效）")
     p_vis.add_argument("--height", default=None, help="图像高度（--gsplat/--preview/--gsplat-interactive 时有效）")
 

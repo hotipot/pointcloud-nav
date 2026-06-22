@@ -428,9 +428,11 @@ def visualize_gsplat(
 def visualize_gsplat_interactive(
     gaussian_data,
     port: int = 8080,
-    width: int = 640,
-    height: int = 480,
+    width: int = 1280,
+    height: int = 720,
     fov: float = 90.0,
+    image_format: str = "png",
+    gpu_id: int = 0,
 ):
     """
     使用 viser 启动交互式 gsplat 渲染可视化（纯 viser 实现，无 nerfview 依赖）。
@@ -445,8 +447,13 @@ def visualize_gsplat_interactive(
         height: 渲染图像高度（默认 480）
         fov: 初始垂直视场角（度，默认 90.0）
 
+        image_format: 传输图像格式 ("png" 无损但慢, "jpeg" 快但有损, 默认 png)
+        gpu_id: 使用的 GPU 编号（多卡时选择哪张卡，默认 0）
+
     Note:
         需要 NVIDIA GPU (CUDA)，macOS 不可用。
+        推荐分辨率 1280x720 或 1920x1080，640x480 会显得模糊。
+        双卡环境可用 --gpu 选择渲染卡，或用 CUDA_VISIBLE_DEVICES 环境变量控制。
     """
     import time
     import platform
@@ -476,7 +483,20 @@ def visualize_gsplat_interactive(
             )
         raise RuntimeError(msg)
 
-    device = torch.device("cuda")
+    # --- GPU 信息 & 选择 ---
+    num_gpus = torch.cuda.device_count()
+    print(f"检测到 {num_gpus} 块 NVIDIA GPU:")
+    for i in range(num_gpus):
+        name = torch.cuda.get_device_name(i)
+        mem = torch.cuda.get_device_properties(i).total_mem / (1024**3)
+        marker = " ← 选中" if i == gpu_id else ""
+        print(f"  GPU {i}: {name} ({mem:.1f} GB){marker}")
+
+    if gpu_id >= num_gpus:
+        print(f"⚠️  --gpu {gpu_id} 超出范围，自动切换到 GPU 0")
+        gpu_id = 0
+
+    device = torch.device(f"cuda:{gpu_id}")
 
     # --- 准备高斯参数（转换为 GPU tensor，与 _render_gsplat 保持一致） ---
     means = torch.tensor(gaussian_data.positions, dtype=torch.float32, device=device)
@@ -571,8 +591,10 @@ def visualize_gsplat_interactive(
             rgb = render_colors[0, ..., :3].clamp(0.0, 1.0).cpu().numpy()
             rgb_uint8 = (rgb * 255).astype(np.uint8)
 
-            # 将渲染结果设为场景背景（所有客户端共享）
-            server.scene.set_background_image(rgb_uint8, format="jpeg")
+            # 将渲染结果设为场景背景
+            # PNG 无损但传输慢，JPEG 快但有压缩伪影
+            # 交互时可用 jpeg 提升帧率，静止后自动 png 更清晰
+            server.scene.set_background_image(rgb_uint8, format=image_format)
         finally:
             _render_lock.release()
 
