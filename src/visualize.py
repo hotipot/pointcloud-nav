@@ -536,7 +536,7 @@ def visualize_gsplat_interactive(
     initial_position = np.array([0.0, 0.0, initial_dist], dtype=np.float64) + center
 
     # --- 创建 viser 服务器 ---
-    server = viser.ViserServer(port=port)
+    server = viser.ViserServer(host="0.0.0.0", port=port)
 
     # 渲染防重入锁：避免前一次渲染未完成时重复触发
     _render_lock = threading.Lock()
