@@ -1,33 +1,26 @@
+# SuGaR 第三方代码库（单独管理）
+SuGaR/
+
+# 数据文件
+pointcloud_data/
+*_colmap/
+output/
+
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
 *.egg-info/
 dist/
 build/
-*.egg
-
-# Virtual Environment
 .venv/
 venv/
-ENV/
-
-# Output / Results
-output/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
-*.swo
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Data (large files)
-pointcloud_data/
-
-# Local config (machine-specific paths)
-configs/local.yaml

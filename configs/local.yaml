@@ -1,0 +1,5 @@
+# 本地配置（不纳入版本控制）
+# 此文件会覆盖 default.yaml 中的同名配置项
+
+scene:
+  ply_path: "~/.openclaw/workspace-coder/pointcloud-nav/pointcloud_data/Aholo-603.ply"
