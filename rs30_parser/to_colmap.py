@@ -24,6 +24,9 @@ SuGaR 兼容性说明：
   SuGaR (3DGS) 只接受 SIMPLE_PINHOLE / PINHOLE 模型（不支持 OPENCV 畸变）。
   因此，当相机有畸变时，需要：
     方案 A（推荐）：--undistort，用 OpenCV 去畸变图像，输出 PINHOLE 模型
+      - 使用 alpha=1（保留原图内容）+ 手动裁剪黑边
+      - RS30 畸变很大（k1=0.39），alpha=0 会把焦距压到 20% 只剩 2% 图像
+      - alpha=1 + 裁剪可保留约 62% 图像内容
     方案 B：先输出 OPENCV 模型，然后手动运行 colmap image_undistorter
     方案 C：忽略畸变，直接用 PINHOLE 模型（精度有损，不推荐）
 """
@@ -190,18 +193,17 @@ def undistort_images(
     ], dtype=np.float64)
     
     # 计算去畸变后的新相机矩阵
-    # alpha=0 裁剪到无黑边区域，alpha=1 保留所有像素
+    # alpha=1 保留所有原图内容（RS30 畸变太大，alpha=0 会把焦距压到 20%，只剩 2% 图像）
     img_size = (intrinsics.image_width, intrinsics.image_height)
-    new_K, roi = cv2.getOptimalNewCameraMatrix(K, dist_coeffs, img_size, alpha=0)
+    new_K, roi = cv2.getOptimalNewCameraMatrix(K, dist_coeffs, img_size, alpha=1)
     
     # 计算去畸变映射（只需一次）
     map1, map2 = cv2.initUndistortRectifyMap(
         K, dist_coeffs, None, new_K, img_size, cv2.CV_16SC2,
     )
     
-    # 裁剪后的有效区域
-    x, y, w, h = roi
-    logger.info(f"  去畸变后有效区域: x={x}, y={y}, w={w}, h={h}")
+    # alpha=1 时 roi 是全图，需要手动找有效区域
+    # 先用一张图确定黑边范围
     logger.info(f"  原始内参: fx={intrinsics.fx:.2f}, fy={intrinsics.fy:.2f}, "
                 f"cx={intrinsics.cx:.2f}, cy={intrinsics.cy:.2f}")
     logger.info(f"  去畸变内参: fx={new_K[0,0]:.2f}, fy={new_K[1,1]:.2f}, "
@@ -210,6 +212,27 @@ def undistort_images(
     # 处理每张图像
     images = sorted(list(src_dir.glob("*.jpg")) + list(src_dir.glob("*.JPG")))
     logger.info(f"  去畸变处理 {len(images)} 张图像...")
+    
+    # 用第一张图检测有效区域（非黑边区域）
+    crop_x, crop_y, crop_w, crop_h = 0, 0, intrinsics.image_width, intrinsics.image_height
+    first_img = cv2.imread(str(images[0]))
+    if first_img is not None:
+        dst_first = cv2.remap(first_img, map1, map2, cv2.INTER_LINEAR)
+        gray = cv2.cvtColor(dst_first, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+        coords = cv2.findNonZero(thresh)
+        if coords is not None:
+            x, y, w, h = cv2.boundingRect(coords)
+            # 内缩 2 像素避免边缘伪影
+            margin = 2
+            crop_x = max(0, x + margin)
+            crop_y = max(0, y + margin)
+            crop_w = min(intrinsics.image_width - crop_x, w - 2 * margin)
+            crop_h = min(intrinsics.image_height - crop_y, h - 2 * margin)
+            logger.info(f"  alpha=1 去畸变后有效区域: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}")
+            orig_area = intrinsics.image_width * intrinsics.image_height
+            crop_area = crop_w * crop_h
+            logger.info(f"  保留面积: {crop_area/orig_area*100:.1f}% (vs alpha=0 约 2%)")
     
     processed = 0
     for img_path in images:
@@ -222,8 +245,8 @@ def undistort_images(
         dst = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
         
         # 裁剪到有效区域（去除黑边）
-        if w > 0 and h > 0:
-            dst = dst[y:y+h, x:x+w]
+        if crop_w > 0 and crop_h > 0:
+            dst = dst[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
         
         # 保存
         out_path = dst_dir / img_path.name
@@ -233,13 +256,13 @@ def undistort_images(
     logger.info(f"  去畸变完成: {processed}/{len(images)} 张")
     
     # 返回去畸变后的 PINHOLE 内参
-    # 如果裁剪了，需要调整内参和尺寸
-    final_w = w if (w > 0 and h > 0) else intrinsics.image_width
-    final_h = h if (w > 0 and h > 0) else intrinsics.image_height
+    # 裁剪后需要调整内参和尺寸
+    final_w = crop_w if (crop_w > 0 and crop_h > 0) else intrinsics.image_width
+    final_h = crop_h if (crop_w > 0 and crop_h > 0) else intrinsics.image_height
     final_fx = new_K[0, 0]
     final_fy = new_K[1, 1]
-    final_cx = new_K[0, 2] - x  # 裁剪后调整主点
-    final_cy = new_K[1, 2] - y
+    final_cx = new_K[0, 2] - crop_x  # 裁剪后调整主点
+    final_cy = new_K[1, 2] - crop_y
     
     return {
         "model": "PINHOLE",
