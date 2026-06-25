@@ -531,9 +531,32 @@ def visualize_gsplat_interactive(
 
     # --- 计算初始相机位姿（从场景中心向外看） ---
     center = gaussian_data.positions.mean(axis=0)
+    bbox_min, bbox_max = gaussian_data.bbox
     scene_extent = float(np.max(np.linalg.norm(gaussian_data.positions - center, axis=1)))
-    initial_dist = max(scene_extent * 2.0, 2.0)
-    initial_position = np.array([0.0, 0.0, initial_dist], dtype=np.float64) + center
+    initial_dist = max(scene_extent * 1.5, 2.0)
+
+    # 根据场景边界推断 up 轴：哪个轴跨度最小就是 up 方向
+    bbox_range = bbox_max - bbox_min
+    up_axis = int(np.argmin(bbox_range))  # 0=X, 1=Y, 2=Z
+    up_axis_name = ['X', 'Y', 'Z'][up_axis]
+    print(f"场景跨度: X={bbox_range[0]:.2f}, Y={bbox_range[1]:.2f}, Z={bbox_range[2]:.2f}")
+    print(f"检测到 up 轴: {up_axis_name} (跨度最小 {bbox_range[up_axis]:.2f})")
+
+    # 构造初始相机位置：沿水平面内最长的轴方向偏移
+    # 水平轴 = 除了 up 轴之外跨度最大的轴
+    horizontal_axes = [i for i in range(3) if i != up_axis]
+    primary_axis = horizontal_axes[np.argmax(bbox_range[horizontal_axes])]
+
+    # 相机沿 primary_axis 正方向偏移，看向场景中心
+    offset = np.zeros(3, dtype=np.float64)
+    offset[primary_axis] = initial_dist
+    initial_position = center + offset
+
+    # gsplat 使用 Y-up 约定，如果场景 up 轴不是 Y，需要坐标变换
+    # 但 gsplat rasterization 直接用 viewmat，不做坐标变换
+    # 所以我们只需要确保相机看向中心即可
+    print(f"场景中心: [{center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}]")
+    print(f"初始相机位置: [{initial_position[0]:.2f}, {initial_position[1]:.2f}, {initial_position[2]:.2f}]")
 
     # --- 创建 viser 服务器 ---
     server = viser.ViserServer(host="0.0.0.0", port=port)
@@ -589,7 +612,18 @@ def visualize_gsplat_interactive(
                 )
 
             rgb = render_colors[0, ..., :3].clamp(0.0, 1.0).cpu().numpy()
+            alpha = render_alphas[0, ..., 0].cpu().numpy()
             rgb_uint8 = (rgb * 255).astype(np.uint8)
+
+            # 调试信息（仅前 3 帧）
+            if not hasattr(render_view, '_debug_count'):
+                render_view._debug_count = 0
+            if render_view._debug_count < 3:
+                print(f"  [debug] rgb min={rgb.min():.3f} max={rgb.max():.3f} mean={rgb.mean():.3f}")
+                print(f"  [debug] alpha min={alpha.min():.3f} max={alpha.max():.3f} mean={alpha.mean():.3f}")
+                print(f"  [debug] viewmat={viewmat[0,:3,:3].cpu().numpy()}")
+                print(f"  [debug] cam_pos={c2w[:3,3]}")
+                render_view._debug_count += 1
 
             # 将渲染结果设为场景背景
             # PNG 无损但传输慢，JPEG 快但有压缩伪影
