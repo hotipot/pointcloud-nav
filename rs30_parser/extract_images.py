@@ -69,6 +69,26 @@ def find_jpeg_frames(data: bytes) -> List[int]:
     return positions
 
 
+def sanitize_image_filename(filename: str) -> str:
+    """清理图片文件名，替换小数点避免 COLMAP 解析错误
+    
+    RS30 时间戳精度到小数点后 6 位，如 '1781316971.431163.jpg'
+    COLMAP 用 '.' 作为扩展名分隔符，会把文件名截断为 '1781316971.jpg'
+    导致重名和找不到文件的问题。
+    
+    修复：将非扩展名的小数点替换为下划线
+    '1781316971.431163.jpg' → '1781316971_431163.jpg'
+    """
+    # 找到最后一个 .jpg / .JPG 等扩展名
+    name, ext = os.path.splitext(filename)
+    if ext.lower() in ('.jpg', '.jpeg', '.png'):
+        # 替换文件名部分的所有小数点为下划线
+        name = name.replace('.', '_')
+        return name + ext
+    # 没有已知扩展名，替换所有小数点
+    return filename.replace('.', '_')
+
+
 def extract_timestamp_from_header(data: bytes, jpeg_offset: int) -> Tuple[str, float]:
     """从帧头中提取时间戳
     
@@ -92,8 +112,9 @@ def extract_timestamp_from_header(data: bytes, jpeg_offset: int) -> Tuple[str, f
     if name_end < 0:
         return "", 0.0
     
-    filename = header[name_start:name_end].decode("ascii", errors="replace")
-    ts_str = filename.replace(".jpg", "")
+    filename_raw = header[name_start:name_end].decode("ascii", errors="replace")
+    filename = sanitize_image_filename(filename_raw)
+    ts_str = filename_raw.replace(".jpg", "")
     
     try:
         ts_float = float(ts_str)
