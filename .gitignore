@@ -1,16 +1,5 @@
-# SuGaR 代码库（需要同步修改）
-# submodules/ 和 output/ 仍需忽略
-SuGaR/submodules/
-SuGaR/output/
-
-# SuGaR 编译产物和文档
-SuGaR/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm/doc/
-SuGaR/gaussian_splatting/submodules/diff-gaussian-rasterization/build/
-SuGaR/gaussian_splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/dist/
-SuGaR/gaussian_splatting/submodules/simple-knn/build/
-SuGaR/gaussian_splatting/submodules/simple-knn/dist/
-*.so
-*.egg-info/
+# SuGaR 代码库（体积大，Ubuntu 端单独管理）
+SuGaR/
 
 # 数据文件
 pointcloud_data/
