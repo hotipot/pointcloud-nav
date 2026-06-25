@@ -543,7 +543,6 @@ def visualize_gsplat_interactive(
     print(f"检测到 up 轴: {up_axis_name} (跨度最小 {bbox_range[up_axis]:.2f})")
 
     # 构造初始相机位置：沿水平面内最长的轴方向偏移
-    # 水平轴 = 除了 up 轴之外跨度最大的轴
     horizontal_axes = [i for i in range(3) if i != up_axis]
     primary_axis = horizontal_axes[np.argmax(bbox_range[horizontal_axes])]
 
@@ -552,11 +551,28 @@ def visualize_gsplat_interactive(
     offset[primary_axis] = initial_dist
     initial_position = center + offset
 
-    # gsplat 使用 Y-up 约定，如果场景 up 轴不是 Y，需要坐标变换
-    # 但 gsplat rasterization 直接用 viewmat，不做坐标变换
-    # 所以我们只需要确保相机看向中心即可
+    # 计算 initial_look_at 和 up 向量，供 viser 使用
+    # viser 使用 OpenGL 风格相机 (Y-up, Z-backward)
+    # 需要设置正确的 look_at 和 up 方向
+    look_dir = center - initial_position  # 从相机指向场景中心
+    look_dir = look_dir / np.linalg.norm(look_dir)
+
+    # up 向量：沿场景 up 轴
+    up_vec = np.zeros(3, dtype=np.float64)
+    up_vec[up_axis] = 1.0
+
+    # 如果 look_dir 和 up_vec 接近平行，需要调整
+    if abs(np.dot(look_dir, up_vec)) > 0.99:
+        # 选另一个轴作为临时 up
+        for ax in range(3):
+            if ax != up_axis:
+                up_vec = np.zeros(3, dtype=np.float64)
+                up_vec[ax] = 1.0
+                break
+
     print(f"场景中心: [{center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}]")
     print(f"初始相机位置: [{initial_position[0]:.2f}, {initial_position[1]:.2f}, {initial_position[2]:.2f}]")
+    print(f"初始 look_dir: [{look_dir[0]:.3f}, {look_dir[1]:.3f}, {look_dir[2]:.3f}]")
 
     # --- 创建 viser 服务器 ---
     server = viser.ViserServer(host="0.0.0.0", port=port)
@@ -575,13 +591,37 @@ def visualize_gsplat_interactive(
 
         try:
             # 构造 c2w 矩阵（camera-to-world）
-            c2w = np.eye(4, dtype=np.float32)
-            c2w[:3, :3] = vt.SO3(camera.wxyz).as_matrix()
-            c2w[:3, 3] = np.array(camera.position, dtype=np.float32)
+            # viser 使用 OpenGL 风格相机（Y-up, Z-backward）
+            # gsplat rasterization 期望 OpenCV 风格（Y-down, Z-forward）
+            # 需要在 c2w 左乘一个坐标变换矩阵
+            # OpenGL -> OpenCV: flip Y 和 Z
+            #   [1,  0,  0, 0]
+            #   [0, -1,  0, 0]
+            #   [0,  0, -1, 0]
+            #   [0,  0,  0, 1]
+            gl_to_cv = np.array([
+                [1,  0,  0, 0],
+                [0, -1,  0, 0],
+                [0,  0, -1, 0],
+                [0,  0,  0, 1],
+            ], dtype=np.float32)
+
+            c2w_gl = np.eye(4, dtype=np.float32)
+            c2w_gl[:3, :3] = vt.SO3(camera.wxyz).as_matrix()
+            c2w_gl[:3, 3] = np.array(camera.position, dtype=np.float32)
+
+            # 检查旋转矩阵是否有效（无 NaN）
+            if np.any(np.isnan(c2w_gl)) or np.any(np.isinf(c2w_gl)):
+                return
+
+            # 转换为 OpenCV 风格 c2w
+            c2w = gl_to_cv @ c2w_gl
 
             # 构造内参 K 矩阵
             # viser 的 fov 为垂直视场角（弧度）
             fov_rad = camera.fov
+            if fov_rad <= 0 or fov_rad >= np.pi:
+                fov_rad = np.radians(fov)  # fallback to default
             fy = height / (2.0 * np.tan(fov_rad / 2.0))
             fx = fy * width / height  # 保持像素正方形
             K = np.array(
@@ -592,7 +632,15 @@ def visualize_gsplat_interactive(
             # 转 GPU tensor
             c2w_t = torch.from_numpy(c2w).to(device)
             K_t = torch.from_numpy(K).to(device)
-            viewmat = torch.inverse(c2w_t).unsqueeze(0)  # (1, 4, 4) world-to-camera
+
+            # 计算 world-to-camera (viewmat)
+            # 使用 torch.linalg.inv 并加异常保护
+            try:
+                viewmat = torch.linalg.inv(c2w_t).unsqueeze(0)  # (1, 4, 4) world-to-camera
+            except torch._C._LinAlgError:
+                # 奇异矩阵，跳过此帧
+                return
+
             Ks = K_t.unsqueeze(0)  # (1, 3, 3)
 
             with torch.inference_mode():
@@ -621,13 +669,11 @@ def visualize_gsplat_interactive(
             if render_view._debug_count < 3:
                 print(f"  [debug] rgb min={rgb.min():.3f} max={rgb.max():.3f} mean={rgb.mean():.3f}")
                 print(f"  [debug] alpha min={alpha.min():.3f} max={alpha.max():.3f} mean={alpha.mean():.3f}")
-                print(f"  [debug] viewmat={viewmat[0,:3,:3].cpu().numpy()}")
-                print(f"  [debug] cam_pos={c2w[:3,3]}")
+                print(f"  [debug] cam_pos_gl={c2w_gl[:3,3]}")
+                print(f"  [debug] cam_pos_cv={c2w[:3,3]}")
                 render_view._debug_count += 1
 
             # 将渲染结果设为场景背景
-            # PNG 无损但传输慢，JPEG 快但有压缩伪影
-            # 交互时可用 jpeg 提升帧率，静止后自动 png 更清晰
             server.scene.set_background_image(rgb_uint8, format=image_format)
         finally:
             _render_lock.release()
@@ -635,9 +681,15 @@ def visualize_gsplat_interactive(
     @server.on_client_connect
     def _(client: viser.ClientHandle):
         # 设置初始相机位姿
-        client.camera.position = initial_position
+        # viser 使用 OpenGL 风格 (Y-up, Z-backward)
+        # look_at 指向场景中心，position 在场景外侧
+        client.camera.position = tuple(initial_position.tolist())
         client.camera.look_at = tuple(center.tolist())
         client.camera.fov = float(np.radians(fov))
+        # up 向量：viser 默认 Y-up，如果场景 up 轴不是 Y，需要设置
+        # viser 的 up 向量通过 camera.up_direction 设置
+        if hasattr(client.camera, 'up_direction'):
+            client.camera.up_direction = tuple(up_vec.tolist())
 
         # 注册相机更新回调：每次相机变化时重新渲染
         @client.camera.on_update
