@@ -708,6 +708,8 @@ def visualize_gsplat_interactive(
             if event.key_up:
                 return
 
+            nonlocal move_step
+
             # 获取当前相机朝向（OpenGL 风格：Y-up, Z-backward）
             R = vt.SO3(client.camera.wxyz).as_matrix()
             pos = np.array(client.camera.position, dtype=np.float64)
@@ -744,12 +746,10 @@ def visualize_gsplat_interactive(
                 moved = True
             elif key == "=":
                 # 加速移动步长
-                nonlocal move_step
                 move_step = min(move_step * 1.5, 5.0)
                 print(f"  移动步长: {move_step:.2f} m")
             elif key == "-":
                 # 减速移动步长
-                nonlocal move_step
                 move_step = max(move_step / 1.5, 0.05)
                 print(f"  移动步长: {move_step:.2f} m")
 
