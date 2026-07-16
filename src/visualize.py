@@ -696,15 +696,83 @@ def visualize_gsplat_interactive(
         def _(_: viser.CameraHandle):
             render_view(client.camera)
 
+        # 键盘控制：方向键前后左右移动视角
+        move_step = 0.3  # 每次按键移动距离（米）
+
+        @client.on_keyboard_event
+        def _on_key(event: viser.KeyboardEvent) -> None:
+            """方向键控制相机前后左右移动"""
+            import viser.transforms as vt
+
+            # 只处理 key-down 事件，忽略 key-up
+            if event.key_up:
+                return
+
+            # 获取当前相机朝向（OpenGL 风格：Y-up, Z-backward）
+            R = vt.SO3(client.camera.wxyz).as_matrix()
+            pos = np.array(client.camera.position, dtype=np.float64)
+
+            # OpenGL 相机坐标系：
+            #   -X = 左, +X = 右
+            #   -Y = 下, +Y = 上
+            #   -Z = 前（看向 -Z 方向）, +Z = 后
+            forward = -R[:, 2]  # 相机前方（OpenGL -Z → 世界坐标前方向）
+            right = R[:, 0]    # 相机右方（OpenGL +X）
+
+            key = event.key.lower()
+            moved = False
+
+            if key == "arrowup" or key == "w":
+                pos += forward * move_step
+                moved = True
+            elif key == "arrowdown" or key == "s":
+                pos -= forward * move_step
+                moved = True
+            elif key == "arrowleft" or key == "a":
+                pos -= right * move_step
+                moved = True
+            elif key == "arrowright" or key == "d":
+                pos += right * move_step
+                moved = True
+            elif key == "q":
+                # 上升
+                pos[up_axis] += move_step
+                moved = True
+            elif key == "e":
+                # 下降
+                pos[up_axis] -= move_step
+                moved = True
+            elif key == "=":
+                # 加速移动步长
+                nonlocal move_step
+                move_step = min(move_step * 1.5, 5.0)
+                print(f"  移动步长: {move_step:.2f} m")
+            elif key == "-":
+                # 减速移动步长
+                nonlocal move_step
+                move_step = max(move_step / 1.5, 0.05)
+                print(f"  移动步长: {move_step:.2f} m")
+
+            if moved:
+                # 更新相机位置，同时保持 look_at 跟随移动
+                # 这样视角方向不变，只是平移
+                look_at = np.array(client.camera.look_at, dtype=np.float64)
+                look_at_shift = pos - np.array(client.camera.position, dtype=np.float64)
+                client.camera.position = tuple(pos.tolist())
+                client.camera.look_at = tuple((look_at + look_at_shift).tolist())
+                # on_update 回调会自动触发 render_view
+
         # 初始渲染
         render_view(client.camera)
 
-    print(f"\n{'='*55}")
+    print(f"\n{'='*60}")
     print(f"  🎨 gsplat 交互式可视化已启动")
     print(f"  🌐 打开浏览器访问: http://localhost:{port}")
     print(f"  🖱️  鼠标拖拽旋转 | 滚轮缩放")
+    print(f"  ⌨️  方向键/WASD: 前后左右移动 | Q/E: 上下")
+    print(f"  ⌨️  +/-: 调整移动步长")
     print(f"  ⏹️  按 Ctrl+C 退出")
-    print(f"{'='*55}\n")
+    print(f"{'='*60}\n")
 
     try:
         while True:
